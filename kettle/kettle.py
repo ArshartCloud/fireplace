@@ -10,6 +10,7 @@ from hearthstone.enums import (
 	CardType, ChoiceType, GameTag, OptionType, Step, Zone
 )
 from fireplace import actions, cards
+from fireplace.exceptions import GameOver
 from fireplace.game import BaseGame as Game
 from fireplace.player import Player
 from fireplace.utils import CardList
@@ -38,6 +39,9 @@ class KettleManager:
 
 	def action_start(self, type, source, index, target):
 		DEBUG("Beginning new action %r (%r, %r, %r)", type, source, index, target)
+		# prevent unprocessed updates appearing inside the block
+		# this may happen if queued tag changes are outside of blocks
+		self.refresh_full_state()
 		packet = {
 			"SubType": type,
 			"EntityID": source.entity_id,
@@ -143,6 +147,9 @@ class KettleManager:
 			"Source": choice.source.entity_id,
 			"PlayerId": 1,
 		}
+		for show_choice in choice.cards:
+			self.refresh_state(show_choice.entity_id)
+			self.queued_data.append(self.show_entity(show_choice))
 		payload = {"Type": "EntityChoices", "EntityChoices": self.choices}
 		self.queued_data.append(payload)
 
@@ -213,6 +220,8 @@ class KettleManager:
 		self.game.current_player.choice.choose(*entities)
 
 	def tag_change(self, entity, tag, value):
+		if tag < 0:
+			return
 		DEBUG("Queueing a tag change for entity %r: %r -> %r", entity, tag, value)
 		payload = {
 			"Type": "TagChange",
@@ -252,6 +261,16 @@ class KettleManager:
 			}
 		}
 
+	def show_entity(self, entity):
+		return {
+			"Type": "ShowEntity",
+			"FullEntity": {
+				"CardID": entity.id,
+				"EntityID": entity.entity_id,
+				"Tags": self.game_state[entity.entity_id],
+			}
+		}
+
 
 class Kettle(socketserver.BaseRequestHandler):
 	def handle(self):
@@ -272,19 +291,15 @@ class Kettle(socketserver.BaseRequestHandler):
 			packet = self.read_packet()
 			if packet is None:
 				break
+			try:
+				self.process_packet(packet, manager)
+			except GameOver:
+				break
 
-			if packet["Type"] == "SendOption":
-				manager.process_send_option(packet["SendOption"])
-			elif packet["Type"] == "ChooseEntities":
-				manager.process_choose_entities(packet["ChooseEntities"])
-			elif packet["Type"] == "Concede":
-				player = manager.game.players[packet["Concede"] - 1]
-				player.concede()
-				manager.refresh_full_state()
-			else:
-				raise NotImplementedError
-
-			self.send_payload(manager)
+		# send final power history delta
+		manager.refresh_full_state()
+		self.send_payload(manager)
+		self.request.close()
 
 	def read_packet(self):
 		header = self.request.recv(4)
@@ -301,6 +316,20 @@ class Kettle(socketserver.BaseRequestHandler):
 		response_payload = struct.pack("<i", len(serialized)) + serialized
 		DEBUG("Sending %r" % (response_payload))
 		self.request.sendall(response_payload)
+
+	def process_packet(self, packet, manager):
+		if packet["Type"] == "SendOption":
+			# throws GameOver when game ends
+			manager.process_send_option(packet["SendOption"])
+		elif packet["Type"] == "ChooseEntities":
+			manager.process_choose_entities(packet["ChooseEntities"])
+		elif packet["Type"] == "Concede":
+			player = manager.game.players[packet["Concede"] - 1]
+			player.concede()
+			manager.refresh_full_state()
+		else:
+			raise NotImplementedError
+		self.send_payload(manager)
 
 	def create_game(self, payload):
 		# self.game_id = payload["GameID"]
@@ -327,6 +356,11 @@ class Kettle(socketserver.BaseRequestHandler):
 		return manager
 
 
+class KettleServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+	daemon_threads = True
+	allow_reuse_address = True
+
+
 def main():
 	arguments = ArgumentParser(prog="kettle")
 	arguments.add_argument("hostname", default="127.0.0.1", nargs="?")
@@ -336,9 +370,11 @@ def main():
 	cards.db.initialize()
 
 	INFO("Listening on %s:%i..." % (args.hostname, args.port))
-	socketserver.TCPServer.allow_reuse_address = True
-	kettle = socketserver.TCPServer((args.hostname, args.port), Kettle)
-	kettle.serve_forever()
+	kettle = KettleServer((args.hostname, args.port), Kettle)
+	try:
+		kettle.serve_forever()
+	except KeyboardInterrupt:
+		sys.exit(0)
 
 	return 0
 

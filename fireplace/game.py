@@ -2,7 +2,7 @@ import random
 import time
 from calendar import timegm
 from itertools import chain
-from hearthstone.enums import CardType, PlayState, PowSubType, State, Step, Zone
+from hearthstone.enums import CardType, PlayState, BlockType, State, Step, Zone
 from .actions import Attack, BeginTurn, Death, EndTurn, EventListener, Play
 from .card import THE_COIN
 from .entity import Entity
@@ -29,13 +29,14 @@ class BaseGame(Entity):
 		self.current_player = None
 		self.tick = 0
 		self.active_aura_buffs = CardList()
+		self.setaside = CardList()
 		self._action_stack = 0
 
 	def __repr__(self):
 		return "%s(players=%r)" % (self.__class__.__name__, self.players)
 
 	def __iter__(self):
-		return chain(self.entities, self.hands, self.decks, self.graveyard, self.discarded)
+		return chain(self.entities, self.hands, self.decks, self.graveyard, self.discarded, self.setaside)
 
 	@property
 	def game(self):
@@ -77,14 +78,22 @@ class BaseGame(Entity):
 	def minions_killed_this_turn(self):
 		return self.players[0].minions_killed_this_turn + self.players[1].minions_killed_this_turn
 
+	@property
+	def ended(self):
+		return self.state == State.COMPLETE
+
 	def action_start(self, type, source, index, target):
 		self.manager.action_start(type, source, index, target)
-		if type != PowSubType.PLAY:
+		if type != BlockType.PLAY:
 			self._action_stack += 1
 
 	def action_end(self, type, source):
 		self.manager.action_end(type, source)
-		if type != PowSubType.PLAY:
+
+		if self.ended:
+			raise GameOver("The game has ended.")
+
+		if type != BlockType.PLAY:
 			self._action_stack -= 1
 		if not self._action_stack:
 			self.log("Empty stack, refreshing auras and processing deaths")
@@ -101,26 +110,29 @@ class BaseGame(Entity):
 		return ret
 
 	def attack(self, source, target):
-		type = PowSubType.ATTACK
+		type = BlockType.ATTACK
 		actions = [Attack(source, target)]
-		return self.action_block(source, actions, type, target=target)
+		result = self.action_block(source, actions, type, target=target)
+		if self.state != State.COMPLETE:
+			self.manager.step(Step.MAIN_ACTION, Step.MAIN_END)
+		return result
 
 	def joust(self, source, challenger, defender, actions):
-		type = PowSubType.JOUST
+		type = BlockType.JOUST
 		return self.action_block(source, actions, type, event_args=[challenger, defender])
 
 	def main_power(self, source, actions, target):
-		type = PowSubType.POWER
+		type = BlockType.POWER
 		return self.action_block(source, actions, type, target=target)
 
 	def play_card(self, card, target, index, choose):
-		type = PowSubType.PLAY
+		type = BlockType.PLAY
 		player = card.controller
 		actions = [Play(card, target, index, choose)]
 		return self.action_block(player, actions, type, index, target)
 
 	def process_deaths(self):
-		type = PowSubType.DEATHS
+		type = BlockType.DEATHS
 		cards = []
 		for card in self.live_entities:
 			if card.to_be_destroyed:
@@ -128,7 +140,7 @@ class BaseGame(Entity):
 
 		actions = []
 		if cards:
-			self.action_start(type, self, -1, None)
+			self.action_start(type, self, 0, None)
 			for card in cards:
 				card.zone = Zone.GRAVEYARD
 				actions.append(Death(card))
@@ -140,7 +152,7 @@ class BaseGame(Entity):
 		"""
 		Perform actions as a result of an event listener (TRIGGER)
 		"""
-		type = PowSubType.TRIGGER
+		type = BlockType.TRIGGER
 		return self.action_block(source, actions, type, event_args=event_args)
 
 	def cheat_action(self, source, actions):
@@ -172,7 +184,9 @@ class BaseGame(Entity):
 					else:
 						player.playstate = PlayState.WON
 			self.state = State.COMPLETE
-			raise GameOver("The game has ended.")
+			self.manager.step(self.next_step, Step.FINAL_WRAPUP)
+			self.manager.step(self.next_step, Step.FINAL_GAMEOVER)
+			self.manager.step(self.next_step)
 
 	def queue_actions(self, source, actions, event_args=None):
 		"""
@@ -284,14 +298,11 @@ class BaseGame(Entity):
 		self.begin_turn(self.current_player.opponent)
 
 	def begin_turn(self, player):
-		return self.queue_actions(self, [BeginTurn(player)])
+		ret = self.queue_actions(self, [BeginTurn(player)])
+		self.manager.turn(player)
+		return ret
 
 	def _begin_turn(self, player):
-		self.manager.step(self.next_step, Step.MAIN_READY)
-		self.turn += 1
-		self.log("%s begins turn %i", player, self.turn)
-		self.current_player = player
-		self.manager.step(self.next_step, Step.MAIN_START_TRIGGERS)
 		self.manager.step(self.next_step, Step.MAIN_START)
 		self.manager.step(self.next_step, Step.MAIN_ACTION)
 

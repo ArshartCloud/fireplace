@@ -10,6 +10,7 @@ TARGETING_PREREQUISITES = (
 	PlayReq.REQ_TARGET_IF_AVAILABLE,
 	PlayReq.REQ_TARGET_IF_AVAILABLE_AND_DRAGON_IN_HAND,
 	PlayReq.REQ_TARGET_IF_AVAILABLE_AND_MINIMUM_FRIENDLY_MINIONS,
+	PlayReq.REQ_TARGET_IF_AVAILABLE_AND_MINIMUM_FRIENDLY_SECRETS,
 )
 
 
@@ -56,6 +57,9 @@ def is_valid_target(self, target, requirements=None):
 				return False
 		elif req == PlayReq.REQ_DAMAGED_TARGET:
 			if not target.damage:
+				return False
+		elif req == PlayReq.REQ_FROZEN_TARGET:
+			if not target.frozen:
 				return False
 		elif req == PlayReq.REQ_TARGET_MAX_ATTACK:
 			if target.atk > param or 0:

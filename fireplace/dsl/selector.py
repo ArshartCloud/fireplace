@@ -2,7 +2,7 @@ import operator
 import random
 from abc import ABCMeta, abstractmethod
 from enum import IntEnum
-from hearthstone.enums import CardType, GameTag, Race, Rarity, Zone
+from hearthstone.enums import CardType, GameTag, Race, Rarity, Zone, CardClass
 from typing import Any, Union, List, Callable, Iterable, Optional, Set
 from .. import enums
 from ..entity import BaseEntity
@@ -127,6 +127,7 @@ COST = AttrValue(GameTag.COST)
 DAMAGE = AttrValue(GameTag.DAMAGE)
 MANA = AttrValue(GameTag.RESOURCES)
 USED_MANA = AttrValue(GameTag.RESOURCES_USED)
+NUM_ATTACKS_THIS_TURN = AttrValue(GameTag.NUM_ATTACKS_THIS_TURN)
 
 
 class ComparisonSelector(Selector):
@@ -220,7 +221,7 @@ class SetOpSelector(Selector):
 
 	def __repr__(self):
 		name = self.op.__name__
-		if name == "add_":
+		if name == "and_":
 			infix = "+"
 		elif name == "or_":
 			infix = "|"
@@ -262,7 +263,7 @@ class BoardPositionSelector(Selector):
 		for e in self.child.eval(entities, source):
 			if getattr(e, "zone", None) == Zone.PLAY:
 				field = e.controller.field
-				position = e.zone_position
+				position = e.zone_position - 1
 				if self.direction == self.Direction.RIGHT:
 					# Swap the list, reverse the position
 					field = list(reversed(field))
@@ -352,7 +353,7 @@ CardType.test = lambda self, entity, *args: entity is not None and self == entit
 Race.test = lambda self, entity, *args: entity is not None and self == getattr(entity, "race", Race.INVALID)
 Rarity.test = lambda self, entity, *args: entity is not None and self == getattr(entity, "rarity", Rarity.INVALID)
 Zone.test = lambda self, entity, *args: entity is not None and self == entity.zone
-
+CardClass.test = lambda self, entity, *args: entity is not None and self == getattr(entity, "card_class", CardClass.INVALID)
 
 BATTLECRY = EnumSelector(GameTag.BATTLECRY)
 CHARGE = EnumSelector(GameTag.CHARGE)
@@ -370,6 +371,7 @@ CLASS_CARD = EnumSelector(GameTag.CLASS)
 ALWAYS_WINS_BRAWLS = AttrValue(enums.ALWAYS_WINS_BRAWLS) == True
 KILLED_THIS_TURN = AttrValue(enums.KILLED_THIS_TURN) == True
 
+ROGUE = EnumSelector(CardClass.ROGUE)
 
 IN_PLAY = EnumSelector(Zone.PLAY)
 IN_DECK = EnumSelector(Zone.DECK)

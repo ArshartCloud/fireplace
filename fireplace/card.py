@@ -4,7 +4,7 @@ from . import actions, cards, rules
 from .aura import TargetableByAuras
 from .entity import BaseEntity, Entity, boolean_property, int_property, slot_property
 from .managers import CardManager
-from .targeting import is_valid_target
+from .targeting import is_valid_target, TARGETING_PREREQUISITES
 from .utils import CardList
 from .exceptions import InvalidAction
 
@@ -45,7 +45,7 @@ class BaseCard(BaseEntity):
 		self.tags.update(data.tags)
 
 	def __str__(self):
-		return self.name
+		return self.data.name
 
 	def __hash__(self):
 		return self.id.__hash__()
@@ -86,7 +86,8 @@ class BaseCard(BaseEntity):
 			Zone.HAND: self.controller.hand,
 			Zone.DECK: self.controller.deck,
 			Zone.DISCARD: self.controller.discarded,
-			Zone.GRAVEYARD: self.controller.graveyard
+			Zone.GRAVEYARD: self.controller.graveyard,
+			Zone.SETASIDE: self.game.setaside,
 		}
 		if caches.get(old) is not None:
 			caches[old].remove(self)
@@ -165,6 +166,13 @@ class PlayableCard(BaseCard, Entity, TargetableByAuras):
 		self._cost = value
 
 	@property
+	def must_choose_one(self):
+		"""
+		Returns True if the card has active choices
+		"""
+		return bool(self.choose_cards)
+
+	@property
 	def powered_up(self):
 		"""
 		Returns True whether the card is "powered up".
@@ -199,8 +207,7 @@ class PlayableCard(BaseCard, Entity, TargetableByAuras):
 			# Create the "Choose One" subcards
 			del self.choose_cards[:]
 			for id in self.data.choose_cards:
-				card = self.controller.card(id)
-				card.parent_card = self
+				card = self.controller.card(id, source=self, parent=self)
 				self.choose_cards.append(card)
 
 	def destroy(self):
@@ -235,10 +242,10 @@ class PlayableCard(BaseCard, Entity, TargetableByAuras):
 		zone = self.parent_card.zone if self.parent_card else self.zone
 		if zone != self.playable_zone:
 			return False
-		if self.controller.mana < self.cost:
+		if not self.controller.can_pay_cost(self):
 			return False
 		if PlayReq.REQ_TARGET_TO_PLAY in self.requirements:
-			if not self.targets:
+			if not self.play_targets:
 				return False
 		if PlayReq.REQ_NUM_MINION_SLOTS in self.requirements:
 			if self.requirements[PlayReq.REQ_NUM_MINION_SLOTS] > self.controller.minion_slots:
@@ -264,18 +271,21 @@ class PlayableCard(BaseCard, Entity, TargetableByAuras):
 		Queue a Play action on the card.
 		"""
 		if choose:
-			choose = card = self.choose_cards.filter(id=choose)[0]
-			self.log("%r: choosing %r", self, choose)
+			if self.must_choose_one:
+				choose = card = self.choose_cards.filter(id=choose)[0]
+				self.log("%r: choosing %r", self, choose)
+			else:
+				raise InvalidAction("%r cannot be played with choice %r" % (self, choose))
 		else:
-			if self.choose_cards:
+			if self.must_choose_one:
 				raise InvalidAction("%r requires a choice (one of %r)" % (self, self.choose_cards))
 			card = self
 		if not self.is_playable():
 			raise InvalidAction("%r isn't playable." % (self))
-		if card.has_target():
+		if card.requires_target():
 			if not target:
 				raise InvalidAction("%r requires a target to play." % (self))
-			elif target not in self.targets:
+			elif target not in self.play_targets:
 				raise InvalidAction("%r is not a valid target for %r." % (target, self))
 		elif target:
 			self.logger.warning("%r does not require a target, ignoring target %r", self, target)
@@ -301,24 +311,48 @@ class PlayableCard(BaseCard, Entity, TargetableByAuras):
 		"""
 		return self.game.cheat_action(self, [actions.Shuffle(self.controller, self)])
 
-	def has_target(self):
+	def battlecry_requires_target(self):
+		"""
+		True if the play action of the card requires a target
+		"""
+		if self.has_combo and self.controller.combo:
+			if PlayReq.REQ_TARGET_FOR_COMBO in self.requirements:
+				return True
+
+		for req in TARGETING_PREREQUISITES:
+			if req in self.requirements:
+				return True
+		return False
+
+	def requires_target(self):
+		"""
+		True if the card currently requires a target
+		"""
 		if self.has_combo and PlayReq.REQ_TARGET_FOR_COMBO in self.requirements:
 			if self.controller.combo:
 				return True
 		if PlayReq.REQ_TARGET_IF_AVAILABLE in self.requirements:
-			return bool(self.targets)
+			return bool(self.play_targets)
 		if PlayReq.REQ_TARGET_IF_AVAILABLE_AND_DRAGON_IN_HAND in self.requirements:
 			if self.controller.hand.filter(race=Race.DRAGON):
-				return bool(self.targets)
+				return bool(self.play_targets)
 		req = self.requirements.get(PlayReq.REQ_TARGET_IF_AVAILABLE_AND_MINIMUM_FRIENDLY_MINIONS)
 		if req is not None:
 			if len(self.controller.field) >= req:
-				return bool(self.targets)
+				return bool(self.play_targets)
+		req = self.requirements.get(PlayReq.REQ_TARGET_IF_AVAILABLE_AND_MINIMUM_FRIENDLY_SECRETS)
+		if req is not None:
+			if len(self.controller.secrets) >= req:
+				return bool(self.play_targets)
 		return PlayReq.REQ_TARGET_TO_PLAY in self.requirements
 
 	@property
-	def targets(self):
+	def play_targets(self):
 		return [card for card in self.game.characters if is_valid_target(self, card)]
+
+	@property
+	def targets(self):
+		return self.play_targets
 
 
 class LiveEntity(PlayableCard, Entity):
@@ -340,7 +374,7 @@ class LiveEntity(PlayableCard, Entity):
 
 	def _set_zone(self, zone):
 		super()._set_zone(zone)
-		# See issue #283 (Malorne, Anu'barak)
+		# See issue #283 (Malorne, Anub'arak)
 		self._to_be_destroyed = False
 		if zone == Zone.GRAVEYARD:
 			self.turn_killed = self.game.turn
@@ -427,7 +461,7 @@ class Character(LiveEntity):
 
 	@property
 	def attacking(self):
-		return bool(self.attack_target)
+		return self.attack_target is not None
 
 	@property
 	def attack_targets(self):
@@ -454,9 +488,9 @@ class Character(LiveEntity):
 			return False
 		if self.frozen:
 			return False
-		if not self.targets:
+		if not self.attack_targets:
 			return False
-		if target is not None and target not in self.targets:
+		if target is not None and target not in self.attack_targets:
 			return False
 
 		return True
@@ -579,7 +613,7 @@ class Minion(Character):
 	def adjacent_minions(self):
 		assert self.zone is Zone.PLAY, self.zone
 		ret = CardList()
-		index = self.zone_position
+		index = self.zone_position - 1
 		left = self.controller.field[:index]
 		right = self.controller.field[index + 1:]
 		if left:
@@ -617,7 +651,7 @@ class Minion(Character):
 	@property
 	def zone_position(self):
 		if self.zone == Zone.PLAY:
-			return self.controller.field.index(self)
+			return self.controller.field.index(self) + 1
 		return super().zone_position
 
 	def _set_zone(self, value):
@@ -694,7 +728,7 @@ class Secret(Spell):
 	@property
 	def zone_position(self):
 		if self.zone == Zone.SECRET:
-			return self.controller.secrets.index(self)
+			return self.controller.secrets.index(self) + 1
 		return super().zone_position
 
 	def _set_zone(self, value):
@@ -845,7 +879,7 @@ class HeroPower(PlayableCard):
 
 		self.log("%s uses hero power %r on %r", self.controller, self, target)
 
-		if self.has_target():
+		if self.requires_target():
 			if not target:
 				raise InvalidAction("%r requires a target." % (self))
 			self.target = target
@@ -855,7 +889,6 @@ class HeroPower(PlayableCard):
 		ret = self.activate()
 
 		self.controller.times_hero_power_used_this_game += 1
-		self.controller.used_mana += self.cost
 		self.target = None
 
 		return ret

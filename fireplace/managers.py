@@ -73,11 +73,36 @@ class GameManager(Manager):
 		for observer in self.observers:
 			observer.start_game()
 
-	def step(self, step, next_step):
+	def step(self, step, next_step=None):
 		for observer in self.observers:
 			observer.game_step(step, next_step)
 		self.obj.step = step
-		self.obj.next_step = next_step
+		if next_step is not None:
+			self.obj.next_step = next_step
+
+	def turn(self, player):
+		for observer in self.observers:
+			observer.turn(player)
+
+
+class BaseObserver:
+	def action_start(self, type, source, index, target):
+		pass
+
+	def action_end(self, type, source):
+		pass
+
+	def game_step(self, step, next_step):
+		pass
+
+	def new_entity(self, entity):
+		pass
+
+	def start_game():
+		pass
+
+	def turn(self, player):
+		pass
 
 
 class PlayerManager(Manager):
@@ -88,6 +113,7 @@ class PlayerManager(Manager):
 		GameTag.CONTROLLER: "controller",
 		GameTag.CURRENT_PLAYER: "current_player",
 		GameTag.CURRENT_SPELLPOWER: "spellpower",
+		GameTag.EMBRACE_THE_SHADOW: "healing_as_damage",
 		GameTag.FATIGUE: "fatigue_counter",
 		GameTag.FIRST_PLAYER: "first_player",
 		GameTag.HEALING_DOUBLE: "healing_double",
@@ -100,7 +126,6 @@ class PlayerManager(Manager):
 		GameTag.NUM_MINIONS_PLAYED_THIS_TURN: "minions_played_this_turn",
 		GameTag.NUM_MINIONS_PLAYER_KILLED_THIS_TURN: "minions_killed_this_turn",
 		GameTag.NUM_TIMES_HERO_POWER_USED_THIS_GAME: "times_hero_power_used_this_game",
-		GameTag.OUTGOING_HEALING_ADJUSTMENT: "outgoing_healing_adjustment",
 		GameTag.OVERLOAD_LOCKED: "overload_locked",
 		GameTag.OVERLOAD_OWED: "overloaded",
 		GameTag.PLAYSTATE: "playstate",
@@ -148,6 +173,7 @@ CARD_ATTRIBUTE_MAP = {
 	GameTag.DEFENDING: "defending",
 	GameTag.DIVINE_SHIELD: "divine_shield",
 	GameTag.DURABILITY: "max_durability",
+	GameTag.EMBRACE_THE_SHADOW: "healing_as_damage",
 	GameTag.ENRAGED: "enrage",
 	GameTag.EXHAUSTED: "exhausted",
 	GameTag.EXTRA_DEATHRATTLES: "extra_deathrattles",
@@ -166,8 +192,8 @@ CARD_ATTRIBUTE_MAP = {
 	GameTag.NUM_ATTACKS_THIS_TURN: "num_attacks",
 	GameTag.NUM_TURNS_IN_PLAY: "turns_in_play",
 	GameTag.TAG_ONE_TURN_EFFECT: "one_turn_effect",
-	GameTag.OUTGOING_HEALING_ADJUSTMENT: "outgoing_healing_adjustment",
 	GameTag.OVERLOAD: "overload",
+	GameTag.PARENT_CARD: "parent_card",
 	GameTag.POISONOUS: "poisonous",
 	GameTag.POWERED_UP: "powered_up",
 	GameTag.RARITY: "rarity",
@@ -178,6 +204,7 @@ CARD_ATTRIBUTE_MAP = {
 	GameTag.SILENCED: "silenced",
 	GameTag.SPELLPOWER: "spellpower",
 	GameTag.SPELLPOWER_DOUBLE: "spellpower_double",
+	GameTag.SPELLS_COST_HEALTH: "spells_cost_health",
 	GameTag.STEALTH: "stealthed",
 	GameTag.TAG_AI_MUST_PLAY: "autocast",
 	GameTag.HERO_POWER_DOUBLE: "hero_power_double",
@@ -194,7 +221,7 @@ CARD_ATTRIBUTE_MAP = {
 	GameTag.CARD_SET: None,
 	GameTag.CARDTEXT_INHAND: None,
 	GameTag.CardTextInPlay: None,
-	GameTag.Collectible: None,
+	GameTag.COLLECTIBLE: None,
 	GameTag.DevState: None,
 	GameTag.ELITE: None,
 	GameTag.ENCHANTMENT_IDLE_VISUAL: None,

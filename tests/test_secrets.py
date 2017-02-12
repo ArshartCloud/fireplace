@@ -92,18 +92,14 @@ def test_counterspell_wild_pyromancer():
 
 
 def test_dart_trap():
-	game = prepare_game(WARRIOR, WARRIOR)
+	game = prepare_game(CardClass.WARLOCK, CardClass.WARLOCK)
 	darttrap = game.player1.give("LOE_021")
 	darttrap.play()
 	game.end_turn()
 
-	wisp = game.player2.give(WISP)
-	wisp.play()
-	assert darttrap in game.player1.secrets
 	assert game.player2.hero.health == 30
 	game.player2.hero.power.use()
-	assert darttrap not in game.player1.secrets
-	assert wisp.dead ^ (game.player2.hero.health == 25)
+	assert game.player2.hero.health == 30 - 5 - 2
 
 
 def test_duplicate():
@@ -255,7 +251,7 @@ def test_eye_for_an_eye():
 
 
 def test_flare():
-	game = prepare_game(HUNTER, HUNTER)
+	game = prepare_game()
 	flare = game.player1.give("EX1_544")
 	worgen = game.player1.give("EX1_010")
 	worgen.play()
@@ -301,7 +297,7 @@ def test_freezing_trap():
 
 
 def test_ice_barrier():
-	game = prepare_game(MAGE, MAGE)
+	game = prepare_game()
 	icebarrier = game.player1.give("EX1_289")
 	icebarrier2 = game.player1.give("EX1_289")
 	friendlywisp = game.player1.give(WISP)
@@ -342,7 +338,7 @@ def test_ice_barrier():
 
 
 def test_ice_block():
-	game = prepare_game(WARRIOR, WARRIOR)
+	game = prepare_game(CardClass.WARRIOR, CardClass.WARRIOR)
 	ib = game.player1.give("EX1_295")
 	ib.play()
 	game.end_turn()
@@ -638,7 +634,7 @@ def test_secretkeeper():
 
 
 def test_snake_trap():
-	game = prepare_game(HUNTER, HUNTER)
+	game = prepare_game()
 	snaketrap = game.player1.give("EX1_554")
 	wisp = game.player1.give(WISP)
 	snaketrap.play()

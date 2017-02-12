@@ -3,7 +3,7 @@ from fireplace.cards.utils import Give, JOUST
 
 
 def test_armor():
-	game = prepare_game(WARRIOR, WARRIOR)
+	game = prepare_game(CardClass.WARRIOR, CardClass.WARRIOR)
 	assert game.current_player.hero.armor == 0
 	assert not game.current_player.hero.power.exhausted
 	assert game.current_player.hero.power.is_usable()
@@ -279,8 +279,30 @@ def test_discard_enchanted_cards():
 	assert not game.player1.hand
 
 
+def test_discover():
+	# TODO: use different classes for each player and force player 1 to go first
+	game = prepare_empty_game(CardClass.PRIEST, CardClass.PRIEST)
+
+	# Museum Curator
+	assert game.player1.choice == None
+	curator = game.player1.give("LOE_006")
+	curator.play()
+	assert not game.player1.choice == None
+	assert len(game.player1.choice.cards) == 3
+
+	for card in game.player1.choice.cards:
+		assert (fireplace.cards.db[card].card_class == CardClass.NEUTRAL
+				or fireplace.cards.db[card].card_class == CardClass.PRIEST)
+		assert fireplace.cards.db[card].deathrattle == True
+
+	choice = random.choice(game.player1.choice.cards)
+	game.player1.choice.choose(choice)
+	assert game.player1.choice == None
+	assert len(game.player1.hand) == 1
+
+
 def test_divine_shield():
-	game = prepare_game(MAGE, MAGE)
+	game = prepare_game(CardClass.MAGE, CardClass.MAGE)
 	squire = game.player1.give("EX1_008")
 	squire.play()
 	assert squire.divine_shield
@@ -719,7 +741,7 @@ def test_silence_multiple_buffs():
 
 
 def test_spell_power():
-	game = prepare_game(HUNTER, HUNTER)
+	game = prepare_game(CardClass.HUNTER, CardClass.HUNTER)
 
 	expected_health = 30
 	assert game.player2.hero.health == expected_health
@@ -763,7 +785,7 @@ def test_spell_power():
 
 
 def test_stealth_windfury():
-	game = prepare_game(MAGE, MAGE)
+	game = prepare_game(CardClass.MAGE, CardClass.MAGE)
 	worgen = game.player1.give("EX1_010")
 	worgen.play()
 	assert worgen.stealthed

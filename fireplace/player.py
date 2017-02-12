@@ -1,7 +1,7 @@
 import random
 from itertools import chain
 from hearthstone.enums import CardType, PlayState, Zone
-from .actions import Concede, Draw, Fatigue, Give, Steal, Summon
+from .actions import Concede, Draw, Fatigue, Give, Hit, Steal, Summon
 from .aura import TargetableByAuras
 from .card import Card
 from .deck import Deck
@@ -18,10 +18,11 @@ class Player(Entity, TargetableByAuras):
 	extra_deathrattles = slot_property("extra_deathrattles")
 	healing_double = slot_property("healing_double", sum)
 	hero_power_double = slot_property("hero_power_double", sum)
-	outgoing_healing_adjustment = slot_property("outgoing_healing_adjustment")
+	healing_as_damage = slot_property("healing_as_damage")
 	shadowform = slot_property("shadowform")
 	spellpower_double = slot_property("spellpower_double", sum)
 	spellpower_adjustment = slot_property("spellpower", sum)
+	spells_cost_health = slot_property("spells_cost_health")
 	type = CardType.PLAYER
 
 	def __init__(self, name, deck, hero):
@@ -136,7 +137,7 @@ class Player(Entity, TargetableByAuras):
 	def minion_slots(self):
 		return max(0, self.game.MAX_MINIONS_ON_FIELD - len(self.field))
 
-	def card(self, id, source=None, zone=Zone.SETASIDE):
+	def card(self, id, source=None, parent=None, zone=Zone.SETASIDE):
 		card = Card(id)
 		card.controller = self
 		card.zone = zone
@@ -144,6 +145,8 @@ class Player(Entity, TargetableByAuras):
 		self.game.play_counter += 1
 		if source is not None:
 			card.creator = source
+		if parent is not None:
+			card.parent_card = parent
 		self.game.manager.new_entity(card)
 		return card
 
@@ -177,11 +180,23 @@ class Player(Entity, TargetableByAuras):
 		for card in self.hand[::-1]:
 			card.discard()
 
-	def pay_cost(self, amount: int) -> int:
+	def can_pay_cost(self, card):
+		"""
+		Returns whether the player can pay the resource cost of a card.
+		"""
+		if self.spells_cost_health and card.type == CardType.SPELL:
+			return self.hero.health > card.cost
+		return self.mana >= card.cost
+
+	def pay_cost(self, source, amount: int) -> int:
 		"""
 		Make player pay \a amount mana.
 		Returns how much mana is spent, after temporary mana adjustments.
 		"""
+		if self.spells_cost_health and source.type == CardType.SPELL:
+			self.log("%s spells cost %i health", self, amount)
+			self.game.queue_actions(self, [Hit(self.hero, amount)])
+			return amount
 		if self.temp_mana:
 			# Coin, Innervate etc
 			used_temp = min(self.temp_mana, amount)
@@ -229,7 +244,6 @@ class Player(Entity, TargetableByAuras):
 
 	def concede(self):
 		ret = self.game.cheat_action(self, [Concede(self)])
-		self.game.check_for_end_game()
 		return ret
 
 	def fatigue(self):

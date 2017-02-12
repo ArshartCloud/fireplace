@@ -1,9 +1,11 @@
+from collections import OrderedDict
 from inspect import isclass
-from hearthstone.enums import CardType, Mulligan, PlayState, Step, Zone
-from .dsl import LazyValue, Selector
+from hearthstone.enums import BlockType, CardType, CardClass, Mulligan, PlayState, Step, Zone
+from .dsl import LazyNum, LazyValue, Selector
 from .entity import Entity
 from .logging import log
 from .exceptions import InvalidAction
+from .utils import random_class
 
 
 def _eval_card(source, card):
@@ -49,9 +51,53 @@ class EventListener:
 		return "<EventListener %r>" % (self.trigger)
 
 
-class Action:  # Lawsuit
-	ARGS = ()
+class ActionMeta(type):
+	def __new__(metacls, name, bases, namespace):
+		cls = type.__new__(metacls, name, bases, dict(namespace))
+		argslist = []
+		for k, v in namespace.items():
+			if not isinstance(v, ActionArg):
+				continue
+			v._setup(len(argslist), k, cls)
+			argslist.append(v)
+		cls.ARGS = tuple(argslist)
+		return cls
 
+	@classmethod
+	def __prepare__(metacls, name, bases):
+		return OrderedDict()
+
+
+class ActionArg(LazyValue):
+	def _setup(self, index, name, owner):
+		self.index = index
+		self.name = name
+		self.owner = owner
+
+	def __repr__(self):
+		return "<%s.%s>" % (self.owner.__name__, self.name)
+
+	def evaluate(self, source):
+		# This is used when an event listener triggers and the callback
+		# Action has arguments of the type Action.FOO
+		# XXX we rely on source.event_args to be set, but it's very racey.
+		# If multiple events happen on an entity at once, stuff will go wrong.
+		assert source.event_args
+		return source.event_args[self.index]
+
+
+class CardArg(ActionArg):
+	# Type hint
+	pass
+
+
+class IntArg(ActionArg, LazyNum):
+	def evaluate(self, source):
+		ret = super().evaluate(source)
+		return self.num(ret)
+
+
+class Action(metaclass=ActionMeta):
 	def __init__(self, *args, **kwargs):
 		self._args = args
 		self._kwargs = kwargs
@@ -125,27 +171,6 @@ class Action:  # Lawsuit
 		return True
 
 
-class ActionArg(LazyValue):
-	"""
-	The argument passed to an Action, lazily evaluated
-	"""
-	def __init__(self, name, index, cls):
-		self.name = name
-		self.index = index
-		self.cls = cls
-
-	def __repr__(self):
-		return "<%s.%s>" % (self.cls.__name__, self.name)
-
-	def evaluate(self, source):
-		# This is used when an event listener triggers and the callback
-		# Action has arguments of the type Action.FOO
-		# XXX we rely on source.event_args to be set, but it's very racey.
-		# If multiple events happen on an entity at once, stuff will go wrong.
-		assert source.event_args
-		return source.event_args[self.index]
-
-
 class GameAction(Action):
 	def trigger(self, source):
 		args = self.get_args(source)
@@ -156,7 +181,8 @@ class Attack(GameAction):
 	"""
 	Make \a ATTACKER attack \a DEFENDER
 	"""
-	ARGS = ("ATTACKER", "DEFENDER")
+	ATTACKER = ActionArg()
+	DEFENDER = ActionArg()
 
 	def get_args(self, source):
 		ret = super().get_args(source)
@@ -201,28 +227,35 @@ class BeginTurn(GameAction):
 	"""
 	Make \a player begin the turn
 	"""
-	ARGS = ("PLAYER", )
+	PLAYER = ActionArg()
 
 	def do(self, source, player):
+		source.manager.step(source.next_step, Step.MAIN_READY)
+		source.turn += 1
+		source.log("%s begins turn %i", player, source.turn)
+		source.current_player = player
+		source.manager.step(source.next_step, Step.MAIN_START_TRIGGERS)
+		source.manager.step(source.next_step, source.next_step)
 		self.broadcast(source, EventListener.ON, player)
-		source.game._begin_turn(player)
+		source._begin_turn(player)
 
 
 class Concede(GameAction):
 	"""
 	Make \a player concede
 	"""
-	ARGS = ("PLAYER", )
+	PLAYER = ActionArg()
 
 	def do(self, source, player):
 		player.playstate = PlayState.CONCEDED
+		source.game.check_for_end_game()
 
 
 class Disconnect(GameAction):
 	"""
 	Make \a player disconnect
 	"""
-	ARGS = ("PLAYER", )
+	PLAYER = ActionArg()
 
 	def do(self, source, player):
 		player.playstate = PlayState.DISCONNECTED
@@ -240,7 +273,7 @@ class Death(GameAction):
 	"""
 	Move target to the GRAVEYARD Zone.
 	"""
-	ARGS = ("ENTITY", )
+	ENTITY = ActionArg()
 
 	def do(self, source, target):
 		log.info("Processing Death for %r", target)
@@ -253,7 +286,7 @@ class EndTurn(GameAction):
 	"""
 	End the current turn
 	"""
-	ARGS = ("PLAYER", )
+	PLAYER = ActionArg()
 
 	def do(self, source, player):
 		if player.choice:
@@ -268,7 +301,8 @@ class Joust(GameAction):
 	Note that this does not evaluate the results of the joust. For that,
 	see dsl.evaluators.JoustEvaluator.
 	"""
-	ARGS = ("CHALLENGER", "DEFENDER")
+	CHALLENGER = ActionArg()
+	DEFENDER = ActionArg()
 
 	def get_args(self, source):
 		challenger = self._args[0].eval(source.game, source)
@@ -281,7 +315,8 @@ class Joust(GameAction):
 
 
 class GenericChoice(GameAction):
-	ARGS = ("PLAYER", "CARDS")
+	PLAYER = ActionArg()
+	CARDS = ActionArg()
 
 	def get_args(self, source):
 		player = self._args[0]
@@ -325,7 +360,7 @@ class GenericChoice(GameAction):
 
 
 class MulliganChoice(GameAction):
-	ARGS = ("PLAYER", )
+	PLAYER = ActionArg()
 
 	def __init__(self, *args, callback):
 		super().__init__(*args)
@@ -337,7 +372,11 @@ class MulliganChoice(GameAction):
 		# NOTE: Ideally, we give The Coin when the Mulligan is over.
 		# Unfortunately, that's not compatible with Blizzard's way.
 		self.cards = player.hand.exclude(id="GAME_005")
+		self.source = source
 		self.player = player
+		self.min_count = 0
+		# but weirdly, the game server includes the coin in the mulligan count
+		self.max_count = len(player.hand)
 
 	def choose(self, *cards):
 		self.player.draw(len(cards))
@@ -357,7 +396,11 @@ class Play(GameAction):
 	Make the source player play \a card, on \a target or None.
 	Choose play action from \a choose or None.
 	"""
-	ARGS = ("PLAYER", "CARD", "TARGET", "INDEX", "CHOOSE")
+	PLAYER = ActionArg()
+	CARD = CardArg()
+	TARGET = ActionArg()
+	INDEX = IntArg()
+	CHOOSE = ActionArg()
 
 	def _broadcast(self, entity, source, at, *args):
 		# Prevent cards from triggering off their own play
@@ -369,10 +412,18 @@ class Play(GameAction):
 		player = source
 		log.info("%s plays %r (target=%r, index=%r)", player, card, target, index)
 
-		player.pay_cost(card.cost)
+		player.pay_cost(card, card.cost)
 
 		card.target = target
 		card._summon_index = index
+
+		battlecry_card = choose or card
+		# We check whether the battlecry will trigger, before the card.zone changes
+		if battlecry_card.battlecry_requires_target() and not target:
+			log.info("%r requires a target for its battlecry. Will not trigger.")
+			trigger_battlecry = False
+		else:
+			trigger_battlecry = True
 
 		card.zone = Zone.PLAY
 
@@ -387,8 +438,8 @@ class Play(GameAction):
 
 		# "Can't Play" (aka Counter) means triggers don't happen either
 		if not card.cant_play:
-			battlecry_card = choose or card
-			source.game.queue_actions(card, [Battlecry(battlecry_card, card.target)])
+			if trigger_battlecry:
+				source.game.queue_actions(card, [Battlecry(battlecry_card, card.target)])
 
 			# If the play action transforms the card (eg. Druid of the Claw), we
 			# have to broadcast the morph result as minion instead.
@@ -408,16 +459,21 @@ class Play(GameAction):
 
 
 class Activate(GameAction):
-	ARGS = ("PLAYER", "CARD", "TARGET")
+	PLAYER = ActionArg()
+	CARD = CardArg()
+	TARGET = ActionArg()
 
 	def get_args(self, source):
 		return (source, ) + super().get_args(source)
 
 	def do(self, source, player, heropower, target=None):
+		player.pay_cost(heropower, heropower.cost)
 		self.broadcast(source, EventListener.ON, player, heropower, target)
 
 		actions = heropower.get_actions("activate")
+		source.game.action_start(BlockType.PLAY, heropower, 0, target)
 		source.game.main_power(heropower, actions, target)
+		source.game.action_end(BlockType.PLAY, heropower)
 
 		for minion in player.field.filter(has_inspire=True):
 			actions = minion.get_actions("inspire")
@@ -429,7 +485,8 @@ class Activate(GameAction):
 
 
 class Overload(GameAction):
-	ARGS = ("PLAYER", "AMOUNT")
+	PLAYER = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, player, amount):
 		if player.cant_overload:
@@ -441,7 +498,7 @@ class Overload(GameAction):
 
 
 class TargetedAction(Action):
-	ARGS = ("TARGET", )
+	TARGET = ActionArg()
 
 	def __init__(self, *args, **kwargs):
 		self.source = kwargs.pop("source", None)
@@ -470,8 +527,7 @@ class TargetedAction(Action):
 				v = v.eval(source.game, source)
 			elif isinstance(v, LazyValue):
 				v = v.evaluate(source)
-			elif k.startswith("CARD"):
-				# HACK: card-likes are always named CARDS
+			elif isinstance(k, CardArg):
 				v = _eval_card(source, v)
 			ret.append(v)
 		return ret
@@ -529,7 +585,8 @@ class Buff(TargetedAction):
 	NOTE: Any Card can buff any other Card. The controller of the
 	Card that buffs the target becomes the controller of the buff.
 	"""
-	ARGS = ("TARGET", "BUFF")
+	TARGET = ActionArg()
+	BUFF = ActionArg()
 
 	def get_target_args(self, source, target):
 		buff = self._args[1]
@@ -563,7 +620,8 @@ class CopyDeathrattles(TargetedAction):
 	"""
 	Copy the deathrattles from a card onto the target
 	"""
-	ARGS = ("TARGET", "DEATHRATTLES")
+	TARGET = ActionArg()
+	DEATHRATTLES = ActionArg()
 
 	def do(self, source, target, entities):
 		for entity in entities:
@@ -583,7 +641,8 @@ class Predamage(TargetedAction):
 	"""
 	Predamage target by \a amount.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		for i in range(target.incoming_damage_multiplier):
@@ -599,7 +658,8 @@ class Damage(TargetedAction):
 	"""
 	Damage target by \a amount.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def get_target_args(self, source, target):
 		return [target.predamage]
@@ -636,8 +696,8 @@ class Battlecry(TargetedAction):
 	"""
 	Trigger Battlecry on card targets
 	"""
-
-	ARGS = ("CARD", "TARGET")
+	CARD = CardArg()
+	TARGET = ActionArg()
 
 	def get_target_args(self, source, target):
 		arg = self._args[1]
@@ -649,10 +709,6 @@ class Battlecry(TargetedAction):
 
 	def do(self, source, card, target):
 		player = card.controller
-
-		if card.has_target() and not target:
-			log.info("%r has no target, action exits early", card)
-			return
 
 		if card.has_combo and player.combo:
 			log.info("Activating %r combo targeting %r", card, target)
@@ -702,12 +758,24 @@ class Discover(TargetedAction):
 	"""
 	Opens a generic choice for three random cards matching a filter.
 	"""
-	ARGS = ("TARGET", "CARDS")
+	TARGET = ActionArg()
+	CARDS = CardArg()
 
 	def get_target_args(self, source, target):
+		if target.hero.data.card_class != CardClass.NEUTRAL:
+			# use hero class for Discover if not neutral (eg. Ragnaros)
+			discover_class = target.hero.data.card_class
+		elif source.data.card_class != CardClass.NEUTRAL:
+			# use card class for neutral hero classes
+			discover_class = source.data.card_class
+		else:
+			# use random class for neutral hero classes with neutral cards
+			discover_class = random_class()
+
 		picker = self._args[1] * 3
-		cards = picker.evaluate(source)
-		return [[target.card(card) for card in cards]]
+		picker = picker.copy_with_weighting(1, card_class=CardClass.NEUTRAL)
+		picker = picker.copy_with_weighting(4, card_class=discover_class)
+		return [picker.evaluate(source)]
 
 	def do(self, source, target, cards):
 		log.info("%r discovers %r for %s", source, cards, target)
@@ -718,7 +786,8 @@ class Draw(TargetedAction):
 	"""
 	Make player targets draw a card from their deck.
 	"""
-	ARGS = ("TARGET", "CARD")
+	TARGET = ActionArg()
+	CARD = CardArg()
 
 	def get_target_args(self, source, target):
 		if target.deck:
@@ -741,8 +810,6 @@ class Fatigue(TargetedAction):
 	"""
 	Hit a player with a tick of fatigue
 	"""
-	ARGS = ("TARGET", )
-
 	def do(self, source, target):
 		if target.cant_fatigue:
 			log.info("%s can't fatigue and does not take damage", target)
@@ -764,7 +831,8 @@ class DrawUntil(TargetedAction):
 	"""
 	Make target player target draw up to \a amount cards minus their hand count.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		difference = max(0, amount - len(target.hand))
@@ -784,7 +852,8 @@ class GainArmor(TargetedAction):
 	"""
 	Make hero targets gain \a amount armor.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		target.armor += amount
@@ -795,27 +864,30 @@ class GainMana(TargetedAction):
 	"""
 	Give player targets \a Mana crystals.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
-		target.max_mana += amount
+		target.max_mana = max(target.max_mana + amount, 0)
 
 
 class SpendMana(TargetedAction):
 	"""
 	Make player targets spend \a amount Mana.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
-		target.used_mana += amount
+		target.used_mana = max(target.used_mana + amount, 0)
 
 
 class Give(TargetedAction):
 	"""
 	Give player targets card \a id.
 	"""
-	ARGS = ("TARGET", "CARD")
+	TARGET = ActionArg()
+	CARD = CardArg()
 
 	def do(self, source, target, cards):
 		log.info("Giving %r to %s", cards, target)
@@ -837,7 +909,8 @@ class Hit(TargetedAction):
 	"""
 	Hit character targets by \a amount.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		amount = source.get_damage(amount, target)
@@ -850,11 +923,11 @@ class Heal(TargetedAction):
 	"""
 	Heal character targets by \a amount.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
-		if source.controller.outgoing_healing_adjustment:
-			# "healing as damage" (hack-ish)
+		if source.controller.healing_as_damage:
 			return source.game.queue_actions(source, [Hit(target, amount)])
 
 		amount <<= source.controller.healing_double
@@ -870,7 +943,8 @@ class ManaThisTurn(TargetedAction):
 	"""
 	Give player targets \a amount Mana this turn.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		target.temp_mana += min(target.max_resources - target.mana, amount)
@@ -880,7 +954,8 @@ class Mill(TargetedAction):
 	"""
 	Mill \a count cards from the top of the player targets' deck.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, count):
 		target.mill(count)
@@ -890,7 +965,8 @@ class Morph(TargetedAction):
 	"""
 	Morph minion target into \a minion id
 	"""
-	ARGS = ("TARGET", "CARD")
+	TARGET = ActionArg()
+	CARD = CardArg()
 
 	def get_target_args(self, source, target):
 		card = _eval_card(source, self._args[1])
@@ -917,14 +993,16 @@ class FillMana(TargetedAction):
 	"""
 	Refill \a amount mana crystals from player targets.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		target.used_mana -= amount
 
 
 class Retarget(TargetedAction):
-	ARGS = ("TARGET", "CARD")
+	TARGET = ActionArg()
+	CARD = CardArg()
 
 	def do(self, source, target, new_target):
 		if not new_target:
@@ -956,7 +1034,8 @@ class SetCurrentHealth(TargetedAction):
 	"""
 	Sets the current health of the character target to \a amount.
 	"""
-	ARGS = ("TARGET", "AMOUNT")
+	TARGET = ActionArg()
+	AMOUNT = IntArg()
 
 	def do(self, source, target, amount):
 		log.info("Setting current health on %r to %i", target, amount)
@@ -968,7 +1047,8 @@ class SetTag(TargetedAction):
 	"""
 	Sets targets' given tags.
 	"""
-	ARGS = ("TARGET", "TAGS")
+	TARGET = ActionArg()
+	TAGS = ActionArg()
 
 	def do(self, source, target, tags):
 		if isinstance(tags, dict):
@@ -983,7 +1063,8 @@ class UnsetTag(TargetedAction):
 	"""
 	Unset targets' given tags.
 	"""
-	ARGS = ("TARGET", "TAGS")
+	TARGET = ActionArg()
+	TAGS = ActionArg()
 
 	def do(self, source, target, tags):
 		for tag in tags:
@@ -1013,7 +1094,8 @@ class Summon(TargetedAction):
 	Make player targets summon \a id onto their field.
 	This works for equipping weapons as well as summoning minions.
 	"""
-	ARGS = ("TARGET", "CARD")
+	TARGET = ActionArg()
+	CARD = CardArg()
 
 	def _broadcast(self, entity, source, at, *args):
 		# Prevent cards from triggering off their own summon
@@ -1046,7 +1128,8 @@ class Shuffle(TargetedAction):
 	"""
 	Shuffle card targets into player target's deck.
 	"""
-	ARGS = ("TARGET", "CARD")
+	TARGET = ActionArg()
+	CARD = CardArg()
 
 	def do(self, source, target, cards):
 		log.info("%r shuffles into %s's deck", cards, target)
@@ -1065,7 +1148,8 @@ class Swap(TargetedAction):
 	Swap minion target with \a other.
 	Behaviour is undefined when swapping more than two minions.
 	"""
-	ARGS = ("TARGET", "OTHER")
+	TARGET = ActionArg()
+	OTHER = ActionArg()
 
 	def get_target_args(self, source, target):
 		other = self.eval(self._args[1], source)
@@ -1085,7 +1169,9 @@ class SwapHealth(TargetedAction):
 	"""
 	Swap health between two minions using \a buff.
 	"""
-	ARGS = ("TARGET", "OTHER", "BUFF")
+	TARGET = ActionArg()
+	OTHER = ActionArg()
+	BUFF = ActionArg()
 
 	def do(self, source, target, other, buff):
 		other = other[0]
@@ -1102,7 +1188,8 @@ class Steal(TargetedAction):
 	Make the controller take control of targets.
 	The controller is the controller of the source of the action.
 	"""
-	ARGS = ("TARGET", "CONTROLLER")
+	TARGET = ActionArg()
+	CONTROLLER = ActionArg()
 
 	def get_target_args(self, source, target):
 		if len(self._args) > 1:
@@ -1132,11 +1219,3 @@ class UnlockOverload(TargetedAction):
 		log.info("%s overload gets cleared", target)
 		target.overloaded = 0
 		target.overload_locked = 0
-
-
-# Register the action arguments as attributes to the action
-d = globals().copy()
-for k, v in d.items():
-	if isclass(v) and issubclass(v, Action):
-		for i, arg in enumerate(v.ARGS):
-			setattr(v, arg, ActionArg(arg, i, v))
